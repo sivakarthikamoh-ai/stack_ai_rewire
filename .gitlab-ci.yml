@@ -1,0 +1,94 @@
+stages:
+  - lint
+  - unit
+  - contract
+  - integration
+  - build
+  - push
+  - qa
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+lint:
+  stage: lint
+  image: python:3.13-slim
+  script:
+    - python -m pip install --upgrade pip
+    - pip install ruff
+    - ruff check app tests
+
+unit_test:
+  stage: unit
+  image: python:3.13-slim
+  script:
+    - python -m pip install --upgrade pip
+    - pip install -r requirements.txt pytest
+    - pytest tests/test_unit.py -q
+
+contract_test:
+  stage: contract
+  image: python:3.13-slim
+  script:
+    - python -m pip install --upgrade pip
+    - pip install -r requirements.txt pytest
+    - pytest tests/test_contract.py -q
+
+integration_test:
+  stage: integration
+  image: python:3.13-slim
+  script:
+    - python -m pip install --upgrade pip
+    - pip install -r requirements.txt pytest
+    - pytest tests/test_integration.py -q
+
+build_image:
+  stage: build
+  image: docker:24.1
+  services:
+    - docker:24.1-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - docker build -t model-serving:${CI_COMMIT_SHORT_SHA} .
+
+push_image:
+  stage: push
+  image: docker:24.1
+  services:
+    - docker:24.1-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - docker build -t model-serving:${CI_COMMIT_SHORT_SHA} .
+    - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+    - docker tag model-serving:${CI_COMMIT_SHORT_SHA} "$DOCKERHUB_USERNAME/house-price-api:${CI_COMMIT_SHORT_SHA}"
+    - docker push "$DOCKERHUB_USERNAME/house-price-api:${CI_COMMIT_SHORT_SHA}"
+    - docker tag model-serving:${CI_COMMIT_SHORT_SHA} "$DOCKERHUB_USERNAME/house-price-api:latest"
+    - docker push "$DOCKERHUB_USERNAME/house-price-api:latest"
+  needs:
+    - build_image
+
+qa_smoke_test:
+  stage: qa
+  image: docker:24.1
+  services:
+    - docker:24.1-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  only:
+    - main
+    - qa
+  environment:
+    name: qa
+  script:
+    - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+    - docker pull "$DOCKERHUB_USERNAME/house-price-api:${CI_COMMIT_SHORT_SHA}"
+    - docker run -d --rm --name house-price-api-qa -p 8080:8080 "$DOCKERHUB_USERNAME/house-price-api:${CI_COMMIT_SHORT_SHA}"
+    - sleep 10
+    - curl -fsS http://localhost:8080/health
+    - curl -fsS -X POST http://localhost:8080/predict -H "Content-Type: application/json" -d '{"sqft":1500,"bedrooms":3,"bathrooms":2.0,"age_years":10,"location_score":7.5}'
+    - docker rm -f house-price-api-qa
+  needs:
+    - push_image
